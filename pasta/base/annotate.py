@@ -21,6 +21,7 @@ from __future__ import print_function
 import abc
 import ast
 import contextlib
+import itertools
 import six
 from six.moves import zip
 
@@ -73,19 +74,7 @@ def statement(f):
 
 def block_statement(f):
   """Decorates a function where the node is a statement with children."""
-  @contextlib.wraps(f)
-  def wrapped(self, node, *args, **kwargs):
-    self.prefix(node)
-    f(self, node, *args, **kwargs)
-    if hasattr(self, 'block_suffix'):
-      last_child = ast_utils.get_last_child(node)
-      # Workaround for ast.Module which does not have a lineno
-      if last_child.lineno != getattr(node, 'lineno', 0):
-        indent = (ast_utils.prop(last_child, 'prefix') or '\n').splitlines()[-1]
-        self.block_suffix(node, indent)
-    else:
-      self.suffix(node)
-  return wrapped
+  return _gen_wrapper(f, suffix=False, scope=False)
 
 
 # ==============================================================================
@@ -122,6 +111,10 @@ class BaseVisitor(ast.NodeVisitor):
   def suffix(self, node, max_lines=None):
     """Account for some amount of whitespace as the suffix to a node."""
     self.attr(node, 'suffix', [lambda: self.ws(max_lines=max_lines)])
+
+  def indented(self, node, children_attr):
+    for child in getattr(node, children_attr):
+      yield child
 
   @contextlib.contextmanager
   def scope(self, node):
@@ -166,7 +159,7 @@ class BaseVisitor(ast.NodeVisitor):
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
 
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
     if node.orelse:
@@ -179,7 +172,7 @@ class BaseVisitor(ast.NodeVisitor):
         self.token('else')
         self.attr(node, 'open_else', [self.ws, ':', self.ws_oneline],
                   default=':\n')
-        for stmt in node.orelse:
+        for stmt in self.indented(node, 'orelse'):
           self.visit(stmt)
 
   @abc.abstractmethod
@@ -209,13 +202,13 @@ class BaseVisitor(ast.NodeVisitor):
     self.visit(node.test)
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
     if node.orelse:
       self.attr(node, 'else', [self.ws, 'else', self.ws, ':', self.ws_oneline],
                 default=':\n')
-      for stmt in node.orelse:
+      for stmt in self.indented(node, 'orelse'):
         self.visit(stmt)
 
   @block_statement
@@ -226,14 +219,14 @@ class BaseVisitor(ast.NodeVisitor):
     self.visit(node.iter)
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
         self.visit(stmt)
 
     if node.orelse:
       self.attr(node, 'else', [self.ws, 'else', self.ws, ':', self.ws_oneline],
                 default=':\n')
 
-      for stmt in node.orelse:
+      for stmt in self.indented(node, 'orelse'):
         self.visit(stmt)
 
   @block_statement
@@ -250,12 +243,11 @@ class BaseVisitor(ast.NodeVisitor):
     if len(node.body) == 1 and self.check_is_continued_with(node.body[0]):
       node.body[0].is_continued = True
       self.attr(node, 'with_comma', [self.ws, ',', self.ws], default=', ')
-      self.visit(node.body[0])
     else:
       self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
                 default=':\n')
-      for stmt in node.body:
-        self.visit(stmt)
+    for stmt in self.indented(node, 'body'):
+      self.visit(stmt)
 
   @abc.abstractmethod
   def check_is_continued_with(self, node):
@@ -285,7 +277,7 @@ class BaseVisitor(ast.NodeVisitor):
         self.token(',')
 
     self.attr(node, 'with_body_open', [':', self.ws_oneline], default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
   @space_around
@@ -319,7 +311,7 @@ class BaseVisitor(ast.NodeVisitor):
       self.optional_token(node, 'close_bases', ')')
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
   @block_statement
@@ -343,7 +335,7 @@ class BaseVisitor(ast.NodeVisitor):
 
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
   @block_statement
@@ -358,7 +350,7 @@ class BaseVisitor(ast.NodeVisitor):
     self.attr(node, 'open_finally',
               [self.ws, 'finally', self.ws, ':', self.ws_oneline],
               default='finally:\n')
-    for stmt in node.finalbody:
+    for stmt in self.indented(node, 'finalbody'):
       self.visit(stmt)
 
   @block_statement
@@ -373,7 +365,7 @@ class BaseVisitor(ast.NodeVisitor):
       self.attr(node, 'open_else',
                 [self.ws, 'else', self.ws, ':', self.ws_oneline],
                 default='else:\n')
-      for stmt in node.orelse:
+      for stmt in self.indented(node, 'orelse'):
         self.visit(stmt)
 
   @block_statement
@@ -389,13 +381,13 @@ class BaseVisitor(ast.NodeVisitor):
       self.attr(node, 'open_else',
                 [self.ws, 'else', self.ws, ':', self.ws_oneline],
                 default='else:\n')
-      for stmt in node.orelse:
+      for stmt in self.indented(node, 'orelse'):
         self.visit(stmt)
     if node.finalbody:
       self.attr(node, 'open_finally',
                 [self.ws, 'finally', self.ws, ':', self.ws_oneline],
                 default='finally:\n')
-      for stmt in node.finalbody:
+      for stmt in self.indented(node, 'finalbody'):
         self.visit(stmt)
 
   @block_statement
@@ -412,7 +404,7 @@ class BaseVisitor(ast.NodeVisitor):
         self.token(node.name)
     self.attr(node, 'open_block', [self.ws, ':', self.ws_oneline],
               default=':\n')
-    for stmt in node.body:
+    for stmt in self.indented(node, 'body'):
       self.visit(stmt)
 
   @statement
@@ -1027,12 +1019,51 @@ class AstAnnotator(BaseVisitor):
   def __init__(self, source):
     super(AstAnnotator, self).__init__()
     self.tokens = token_generator.TokenGenerator(source)
+    self._indent = ''
+    self._indent_diff = ''
 
   def visit(self, node):
     try:
+      ast_utils.setprop(node, 'indent', self._indent)
+      ast_utils.setprop(node, 'indent_diff', self._indent_diff)
       super(AstAnnotator, self).visit(node)
     except (TypeError, ValueError, IndexError, KeyError) as e:
       raise AnnotationError(e)
+
+  def indented(self, node, children_attr):
+    """Annotate children with their indentation level and iterate over them."""
+    children = getattr(node, children_attr)
+    cur_loc = self.tokens._loc
+    next_loc = self.tokens.peek().start
+    # Special case: if the first child is on the same line, then there is no
+    # indentation level to track.
+    if len(children) == 1 and cur_loc[0] == next_loc[0]:
+      yield children[0]
+      return
+
+    prev_indent = self._indent
+    prev_indent_diff = self._indent_diff
+
+    # Find the indent level of the first child
+    new_indent = ''.join(itertools.takewhile(
+        lambda s: s in ' \t', self.tokens.lines[children[0].lineno - 1]))
+    if (not new_indent.startswith(prev_indent) or
+        len(new_indent) <= len(prev_indent)):
+      raise AnnotationError('Indent detection failed; inner indentation level '
+                            'is not more than the outer indentation.')
+
+    # Set the indent level to the child's indent and iterate over the children
+    self._indent = new_indent
+    self._indent_diff = new_indent[len(prev_indent):]
+    for child in children:
+      yield child
+    # Store the suffix at this indentation level, which could be many lines
+    ast_utils.setprop(node, 'block_suffix_%s' % children_attr,
+                      self.tokens.block_whitespace(self._indent))
+
+    # Dedent back to the pervious level
+    self._indent = prev_indent
+    self._indent_diff = prev_indent_diff
 
   @expression
   def visit_Num(self, node):
@@ -1070,10 +1101,6 @@ class AstAnnotator(BaseVisitor):
   def ws(self, max_lines=None):
     """Parse some whitespace from the source tokens and return it."""
     return self.tokens.whitespace(max_lines=max_lines)
-
-  def block_suffix(self, node, indent_level):
-    ast_utils.setprop(node, 'suffix',
-                      self.tokens.block_whitespace(indent_level))
 
   def token(self, token_val):
     """Parse a single token with exactly the given value."""
